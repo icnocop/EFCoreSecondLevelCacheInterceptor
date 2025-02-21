@@ -1,9 +1,9 @@
-using System;
+﻿using System;
+using System.Data;
 using System.IO;
 using System.Linq;
 using CacheManager.Serialization.Json;
 using EFCoreSecondLevelCacheInterceptor.Tests.DataLayer;
-using EFCoreSecondLevelCacheInterceptor.Tests.DataLayer.Entities;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -14,7 +14,7 @@ using Newtonsoft.Json;
 namespace EFCoreSecondLevelCacheInterceptor.Tests
 {
     [TestClass]
-    public class SecondLevelCacheInterceptorBasicTests
+    public partial class SecondLevelCacheInterceptorBasicTests
     {
         [DataTestMethod]
         [DataRow(TestCacheProvider.BuiltInInMemory)]
@@ -546,6 +546,61 @@ namespace EFCoreSecondLevelCacheInterceptor.Tests
                             sqlServerOptionsBuilder.MigrationsAssembly(typeof(MsSqlServiceCollectionExtensions).Assembly.FullName);
                         })
                     .AddInterceptors(serviceProvider.GetRequiredService<SecondLevelCacheInterceptor>());
+            var options = (DbContextOptions<ApplicationDbContext>)optionsBuilder.Options;
+
+            using (var context = new ApplicationDbContext(options))
+            {
+                var items1 = context.DateTypes
+                    .Cacheable()
+                    .ToList();
+                Assert.AreEqual(0, loggerProvider.GetCacheHitCount());
+                Assert.IsNotNull(items1);
+
+                var items2 = context.DateTypes
+                    .Cacheable()
+                    .ToList();
+                Assert.AreEqual(1, loggerProvider.GetCacheHitCount());
+                Assert.IsNotNull(items2);
+            }
+        }
+
+        [DataTestMethod]
+        public void TestWithAnotherDbCommandInterceptor()
+        {
+            var services = new ServiceCollection();
+            services.AddOptions();
+            var basePath = Directory.GetCurrentDirectory();
+            Console.WriteLine($"Using `{basePath}` as the ContentRootPath");
+            var configuration = new ConfigurationBuilder()
+                                .SetBasePath(basePath)
+                                .AddJsonFile("appsettings.json", optional: false, reloadOnChange: true)
+                                .Build();
+            services.AddSingleton(_ => configuration);
+
+            var loggerProvider = new DebugLoggerProvider();
+            services.AddLogging(cfg => cfg.AddConsole().AddDebug().AddProvider(loggerProvider).SetMinimumLevel(LogLevel.Debug));
+
+            services.AddEFSecondLevelCache(options =>
+                    options.UseMemoryCacheProvider(CacheExpirationMode.Absolute, TimeSpan.FromMinutes(50))
+                    .CacheAllQueriesExceptContainingTableNames(
+                            CacheExpirationMode.Absolute,
+                            TimeSpan.FromMinutes(30),
+                            realTableNames: ["table_name"]));
+            var serviceProvider = services.BuildServiceProvider();
+
+            var loggerFactory = new LoggerFactory([loggerProvider]);
+            var optionsBuilder = new DbContextOptionsBuilder<ApplicationDbContext>()
+                    .UseLoggerFactory(loggerFactory)
+                    .UseSqlServer(
+                        EFServiceProvider.GetConnectionString(basePath, configuration),
+                        sqlServerOptionsBuilder =>
+                        {
+                            sqlServerOptionsBuilder.CommandTimeout((int)TimeSpan.FromMinutes(3).TotalSeconds);
+                            sqlServerOptionsBuilder.MigrationsAssembly(typeof(MsSqlServiceCollectionExtensions).Assembly.FullName);
+                        })
+                    .AddInterceptors(
+                        new UtcDateTimeConvertingDbCommandInterceptor(),
+                        serviceProvider.GetRequiredService<SecondLevelCacheInterceptor>());
             var options = (DbContextOptions<ApplicationDbContext>)optionsBuilder.Options;
 
             using (var context = new ApplicationDbContext(options))
